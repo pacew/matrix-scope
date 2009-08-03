@@ -390,10 +390,10 @@ factor (void)
 
 	mp = get_matrix (MATRIX_A);
 
-	A[idx(0,0)] = mp->a;
-	A[idx(0,1)] = mp->b;
-	A[idx(1,0)] = mp->c;
-	A[idx(1,1)] = mp->d;
+	A[idx(0,0)] = mp->a + 1e-6;
+	A[idx(0,1)] = mp->b + 2e-6;
+	A[idx(1,0)] = mp->c + 3e-6;
+	A[idx(1,1)] = mp->d + 4e-6;
 
 	jobvl = "V";
 	jobvr = "V";
@@ -625,6 +625,28 @@ near_line (double px, double py, double qx, double qy)
 	return (0);
 }
 	
+void
+make_arrowhead (double x, double y)
+{
+	double ang, d, x1, y1, x2, y2, ang1, ang2;
+	ang = atan2 (y, x);
+	
+	d = 20 / scale;
+
+	ang1 = ang + DTOR (160);
+	x1 = x + d * cos (ang1);
+	y1 = y + d * sin (ang1);
+
+	ang2 = ang - DTOR (160);
+	x2 = x + d * cos (ang2);
+	y2 = y + d * sin (ang2);
+
+	cairo_move_to (cr, xscale (x1), yscale (y1));
+	cairo_line_to (cr, xscale (x), yscale (y));
+	cairo_line_to (cr, xscale (x2), yscale (y2));
+	cairo_close_path (cr);
+	cairo_fill (cr);
+}
 
 void
 redraw (void)
@@ -720,6 +742,10 @@ redraw (void)
 		cairo_move_to (cr, xscale (x1), yscale (y1));
 		cairo_line_to (cr, xscale (x2), yscale (y2));
 		cairo_stroke (cr);
+
+		x1 = s->a * Lambda->a;
+		y1 = s->c * Lambda->a;
+		make_arrowhead (x1, y1); 
 	}
 
 	if (! isnan (s->b) && ! isnan (s->d)) {
@@ -744,6 +770,10 @@ redraw (void)
 		cairo_move_to (cr, xscale (x1), yscale (y1));
 		cairo_line_to (cr, xscale (x2), yscale (y2));
 		cairo_stroke (cr);
+
+		x1 = s->b * Lambda->d;
+		y1 = s->d * Lambda->d;
+		make_arrowhead (x1, y1); 
 	}
 
 
