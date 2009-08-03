@@ -7,13 +7,18 @@
 
 #include <pango/pangocairo.h>
 
+void compute_sinv (void);
+void compute_A_from_SLSinv (void);
+
+
 GtkWidget *window;
 GdkPixbuf *pixbuf;
+GdkCursor *cursor_hand;
 
 #define RTOD(x) ((x) / 2.0 / M_PI * 360)
 #define DTOR(x) ((x) / 360.0 * 2 * M_PI)
 
-double mouse_x, mouse_y, mouse_ang;
+double mouse_x, mouse_y;
 
 int running;
 int recompute;
@@ -76,6 +81,14 @@ struct matrix {
 };
 
 struct matrix *matricies;
+
+struct matrix *A;
+struct matrix *S;
+struct matrix *Lambda;
+struct matrix *Sinv;
+struct matrix *U;
+struct matrix *Sigma;
+struct matrix *Vtrans;
 
 struct matrix *
 get_matrix (char *name)
@@ -374,7 +387,6 @@ factor (void)
 	double eigenvals_re[2], eigenvals_im[2];
 	double eigenvecs_right[4];
 	double eigenvecs_left[4];
-	double det;
 
 	mp = get_matrix (MATRIX_A);
 
@@ -445,11 +457,19 @@ factor (void)
 		dswap (&s->c, &s->d);
 	}
 
-	det = s->a * s->d - s->b * s->c;
-	sinv->a = -1 * s->d / (-1 * det);
-	sinv->b =      s->b / (-1 * det);
-	sinv->c =      s->c / (-1 * det);
-	sinv->d = -1 * s->a / (-1 * det);
+	compute_sinv ();
+}
+
+void
+compute_sinv (void)
+{
+	double det;
+
+	det = S->a * S->d - S->b * S->c;
+	Sinv->a = -1 * S->d / (-1 * det);
+	Sinv->b =      S->b / (-1 * det);
+	Sinv->c =      S->c / (-1 * det);
+	Sinv->d = -1 * S->a / (-1 * det);
 }
 
 cairo_surface_t *surface;
@@ -582,6 +602,30 @@ samedir (double x1, double y1, double x2, double y2)
 	return (0);
 }
 
+int
+near_line (double px, double py, double qx, double qy)
+{
+	/* distance from point q to line y = py/px * x */
+	double nx, ny, nlen, d, pixel_dist;
+
+	nx = -py;
+	ny = px;
+
+	nlen = hypot (nx, ny);
+
+	if (nlen < 1e-6)
+		return (0);
+
+	d = fabs (((-qx * nx) + (-qy * ny)) / nlen);
+
+	pixel_dist = d * scale;
+
+	if (pixel_dist < 5)
+		return (1);
+	return (0);
+}
+	
+
 void
 redraw (void)
 {
@@ -598,6 +642,7 @@ redraw (void)
 	double x1, y1, x2, y2;
 	int highlight;
 	double val;
+	GdkCursor *cursor = NULL;
 	
 	if (recompute) {
 		recompute = 0;
@@ -656,6 +701,9 @@ redraw (void)
 	if (! isnan (s->a) && ! isnan (s->c)) {
 		highlight = 0;
 
+		if (near_line (s->a, s->c, mouse_x, mouse_y))
+			cursor = cursor_hand;
+
 		if (samedir (s->a, s->c, x_in, y_in))
 			highlight = 1;
 
@@ -676,6 +724,9 @@ redraw (void)
 
 	if (! isnan (s->b) && ! isnan (s->d)) {
 		highlight = 0;
+
+		if (near_line (s->b, s->d, mouse_x, mouse_y))
+			cursor = cursor_hand;
 
 		if (samedir (s->b, s->d, x_in, y_in))
 			highlight = 1;
@@ -773,6 +824,8 @@ redraw (void)
 	g_object_unref (p_layout);
 
 	cairo_destroy (cr);
+
+	gdk_window_set_cursor (window->window, cursor);
 }
 
 gboolean
@@ -800,12 +853,47 @@ expose_event (GtkWidget *widget, GdkEventExpose *ev, gpointer user_data)
 	return (TRUE);
 }
 
+enum grab_state {
+	grab_idle,
+	grab_evect1,
+	grab_evect2,
+} grab_state;
+
+double grab_last_mouse_ang;
+
 gboolean
 button_press_event (GtkWidget *widget, GdkEventButton *ev, gpointer user_data)
 {
+	struct matrix *s;
+
 	/* GDK_CONTROL_MASK GDK_SHIFT_MASK */
 	printf ("button press %d %g %g 0x%x\n",
 		ev->button, ev->x, ev->y, ev->state);
+
+	s = get_matrix (MATRIX_S);
+
+	mouse_x = (ev->x - graph_cx) / scale;
+	mouse_y = ((height - ev->y) - graph_cy) / scale;
+	
+	grab_state = grab_idle;
+
+	if (near_line (s->a, s->c, mouse_x, mouse_y)) {
+		printf ("grab 1\n");
+		grab_state = grab_evect1;
+		grab_last_mouse_ang = atan2 (mouse_y, mouse_x);
+	} else if (near_line (s->b, s->d, mouse_x, mouse_y)) {
+		printf ("grab 2\n");
+		grab_state = grab_evect2;
+		grab_last_mouse_ang = atan2 (mouse_y, mouse_x);
+	}
+
+	return (TRUE);
+}
+
+gboolean
+button_release_event (GtkWidget *widget, GdkEventButton *ev, gpointer user_data)
+{
+	grab_state = grab_idle;
 	return (TRUE);
 }
 
@@ -875,19 +963,68 @@ void
 process_motion (int x, int y)
 {
 	struct numbox *np;
+	double ang_diff, ang;
+	double new_mouse_ang;
 
 	mouse_x = (x - graph_cx) / scale;
 	mouse_y = ((height - y) - graph_cy) / scale;
-	mouse_ang = atan2 (mouse_y, mouse_x);
 
-	highlighted_numbox = NULL;
-	for (np = numboxes; np; np = np->next) {
-		if (np->x <= x && x <= np->x + numbox_width
-		    && np->y <= y && y <= np->y + numbox_height) {
-			highlighted_numbox = np;
-			break;
+	if (grab_state == grab_idle) {
+		highlighted_numbox = NULL;
+		for (np = numboxes; np; np = np->next) {
+			if (np->x <= x && x <= np->x + numbox_width
+			    && np->y <= y && y <= np->y + numbox_height) {
+				highlighted_numbox = np;
+				break;
+			}
 		}
+		return;
 	}
+
+	new_mouse_ang = atan2 (mouse_y, mouse_x);
+	ang_diff = new_mouse_ang - grab_last_mouse_ang;
+	grab_last_mouse_ang = new_mouse_ang;
+
+	if (ang_diff > M_PI)
+		ang_diff -= 2 * M_PI;
+	if (ang_diff < -M_PI)
+		ang_diff += 2 * M_PI;
+
+
+	switch (grab_state) {
+	case grab_idle:
+		break;
+	case grab_evect1:
+		ang = atan2 (S->c, S->a) + ang_diff;
+		S->a = cos (ang);
+		S->c = sin (ang);
+		break;
+	case grab_evect2:
+		ang = atan2 (S->d, S->b) + ang_diff;
+		S->b = cos (ang);
+		S->d = sin (ang);
+		break;
+	}
+
+	compute_sinv ();
+	compute_A_from_SLSinv ();
+	factor ();
+	
+}
+
+void
+compute_A_from_SLSinv (void)
+{
+	double a, b, c, d;
+	a = Lambda->a * Sinv->a + Lambda->b * Sinv->c;
+	b = Lambda->a * Sinv->b + Lambda->b * Sinv->d;
+	c = Lambda->c * Sinv->a + Lambda->d * Sinv->c;
+	d = Lambda->c * Sinv->b + Lambda->d * Sinv->d;
+
+	A->a = S->a * a + S->b * c;
+	A->b = S->a * b + S->b * d;
+	A->c = S->c * a + S->d * c;
+	A->d = S->c * b + S->d * d;
 }
 
 
@@ -940,6 +1077,9 @@ main (int argc, char **argv)
 	g_signal_connect (G_OBJECT (window), "button_press_event",
 			  G_CALLBACK (button_press_event), NULL);
 
+	g_signal_connect (G_OBJECT (window), "button_release_event",
+			  G_CALLBACK (button_release_event), NULL);
+
 	g_signal_connect (G_OBJECT (window), "scroll_event",
 			  G_CALLBACK (scroll_event), NULL);
 
@@ -951,20 +1091,32 @@ main (int argc, char **argv)
 			       | GDK_POINTER_MOTION_MASK
 			       | GDK_POINTER_MOTION_HINT_MASK
 			       | GDK_BUTTON_PRESS_MASK
+			       | GDK_BUTTON_RELEASE_MASK
 			       | GDK_KEY_PRESS_MASK
 			       | GDK_SCROLL_MASK);
 
 	gtk_window_set_default_size (GTK_WINDOW(window), 640, 480);
 
+	cursor_hand = gdk_cursor_new (GDK_HAND2);
+
 	gtk_widget_show (window);
 
 	running = 1;
+
+	A = get_matrix (MATRIX_A);
+	S = get_matrix (MATRIX_S);
+	Lambda = get_matrix (MATRIX_LAMBDA);
+	Sinv = get_matrix (MATRIX_Sinv);
+	U = get_matrix (MATRIX_U);
+	Sigma = get_matrix (MATRIX_SIGMA);
+	Vtrans = get_matrix (MATRIX_Vtrans);
 
 	mp = get_matrix (MATRIX_A);
 	mp->a = 2;
 	mp->b = 0;
 	mp->c = 1;
 	mp->d = 3;
+
 
 	/* 2 : (.71,-.71)   3 : (0, -1) */
 	/* rotation [.866, .5; -.5, .866] ev 0 : (.54,-.84), 0 : (.54,-.84) */
